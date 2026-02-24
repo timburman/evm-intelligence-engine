@@ -31,42 +31,126 @@ class TokenRegistry:
             "56": "binance-smart-chain",
         }
 
-    async def initialize(self):
+        # Initialize
+        self._load_missing_cache()
+        self.initialize_local()
+
+    def initialize_local(self):
         """
-        Call this at startup to load data.
+        Loads the big list from disk if it exists.
         """
-        await self._refresh_registry_if_needed()
-        self._build_fast_lookup()
+        if os.path.exists(REGISTRY_FILE):
+            # Check if file is stale immediately on startup
+            if self._is_cache_stale():
+                print("[STARTUP] Local cache is old. Will fetch new one on first request.")
+            else:
+                with open(REGISTRY_FILE, "r") as f:
+                    data = json.load(f)
+                    self._build_fast_lookup(data)
+
+    def _load_missing_cache(self):
+        if os.path.exists(MISSING_FILE):
+            with open(MISSING_FILE, "r") as f:
+                self.missing_map = json.load(f)
+
+    def _save_missing_cache(self):
+        with open(MISSING_FILE, "w") as f:
+            json.dump(self.missing_map, f)
+
+    def _is_cache_stale(self) -> bool:
+        """
+        Returns True if the local JSON is older than 1 day.
+        """
+        if not os.path.exists(REGISTRY_FILE):
+            return True
+        return (time.time() - os.path.getmtime(REGISTRY_FILE)) > CACHE_DURATION
 
     async def resolve_token(self, chain_id: str, address: str) -> optional[str]:
         """
         Returns the CoinGecko API ID for a given address.
+        Flow: Refresh Master List (if old) -> Check Master List -> Check Blacklist -> Hard Retry.
         If None -> It's Spam/Unknown
         """
         # 1. Check Memory Cache
-        platform_id = self.chain_map.get(chain_id)
-        if not platform_id:
+        platform = self.chain_map.get(chain_id)
+        if not platform:
             return None
 
-        cg_id = self.lookup_map.get(platform_id, {}).get(address.lower())
+        addr_lower = address.lower()
         
-        # 2. If missing. Try One refetch.
-        if not cg_id:
-            print(f"[REGISTRY] Token {address[:6]}... not found. Checking for updates")
-            updated = await self._refresh_registry_if_needed(force=True)
-            if updated:
-                self._build_fast_lookup()
-                cg_id = self.lookup_map.get(platform_id, {}).get(address.lower())
+        # STEP 0: Auto-Update Master list
+        # If the cache is > 24h old, we update it Now.
+        # This ensures 'lookup_map' has the latest tokens before we search.
+        if self._is_cache_stale():
+            await self._refresh_registry_if_needed()
 
-        return cg_id
+        # STEP 1: CHECK VALID LIST (Fast O(1) Lookup)
+        # If Token X was listed yesterday, it's here now. We return it immediately
+        cg_id = self.lookup_map.get(platform, {}).get(addr_lower)
+        if cg_id:
+            # If it was in the blacklist, remove it (it's valid now!)
+            if addr_lower in self.missing_map:
+                del self.missing_map[addr_lower]
+                self._save_missing_cache()
+            return cg_id
+        
+        # STEP 2: CHECK BLACKLIST (Smart Filtering)
+        # Only reached if token is Not in the master list
+        last_checked = self.missing_map.get(addr_lower)
+        if last_checked:
+            if (time.time() - last_checked) < MISSING_TTL:
+                # It's spam, and we checked recently. IGNORE.
+                return None
+            else:
+                # TTL Expired! Remove from flacklist and give it a chance below
+                del self.missing_map[addr_lower]
 
+        # STEP 3: HARD REFRESH (The Last Resort)
+        # Maybe it was listed 5 minutes ago? We force a refresh.
+        print(f"[REGISTRY] Unknown token {addr_lower[:6]}... Checking remote updates...")
+        updated = await._refresh_registry_if_needed(force=True)
+
+        if updated:
+            # Check one last time
+            cg_id = self.lookup_map.get(platform, {}).get(addr_lower)
+            if cg_id:
+                return cg_id
+
+        # STEP 4: BLACKLIST IT 
+        # CoinGecko doesn't know it. It's Spam. See you in 3 days spam.
+        print(f"[REGISTRY] Token {addr_lower[:6]} is likely SPAM. Blacklisting for 3 days.")
+        self.missing_map[addr_lower] = time.time()
+        self._save_missing_cache()
+
+        return None
+        
     async def _refresh_registry_if_needed(self, force=False) -> bool:
         """
         Fetches the massive JSON list from CoinGecko if cache is old.
         Returns True if a new fetch happened.
         """
-        is_exist = os.path.exists(REGISTRY_FILE)
-        is_old = is_exist and (time.time() - os.path.getmtime(REGISTRY_FILE) > )
+        if self._is_cache_stale() or force:
+            print("[REGISTRY] Downloading CoinGecko coin list")
+            async with httpx.AsyncClient() as client:
+                try:
+                    resp = await client.get(
+                           COINGECKO_LIST_URL,
+                           params={"include_platform": True}
+                           )
+                    if resp.status_code == 200:
+                        data = resp.json()
 
-    def _build_fast_lookup(self):
+                        os.makedirs(os.path.dirname(REGISTRY_FILE), exist_ok=True)
+                        with open(REGISTRY_FILE, "w") as f:
+                            json.dump(data, f)
+
+                        self._build_fast_lookup(data)
+                        return True
+                    else:
+                        print(f"[ERROR] CoinGecko List Fetch Failed: {resp.status_code}")
+                except Exception as e:
+                    print(f"[ERROR] Registry update failed: {e}")
+        return False
+
+    def _build_fast_lookup(self, raw_data):
         pass
