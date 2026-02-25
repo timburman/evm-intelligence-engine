@@ -10,8 +10,9 @@ REGISTRY_FILE = "data/prices/coin_list.json"
 MISSING_FILE = "data/prices/missing_tokens.json"
 
 # Config
-CACHE_DURATION = 86400
-MISSING_TTL = 86400 * 3
+CACHE_DURATION = 86400  # 1 Day
+MISSING_TTL = 86400 * 3  # 3 Days
+REFRESH_COOLDOWN = 3600  # 1 Hour
 
 
 class TokenRegistry:
@@ -23,8 +24,12 @@ class TokenRegistry:
     def __init__(self) -> None:
         # Structure: { "chain_id": { "lowercase_address": "coingecko_id" } }
         self.lookup_map: dict[str, dict[str, str]] = {}
+
+        # The Blacklist: {"0x213....": timestamp_checked}
         self.missing_map: dict[str, float] = {}
         self.raw_data = []
+
+        self.last_refresh_ts = 0
 
         self.chain_map = {
             "1": "ethereum",
@@ -42,6 +47,8 @@ class TokenRegistry:
         Loads the big list from disk if it exists.
         """
         if os.path.exists(REGISTRY_FILE):
+            self.last_refresh_ts = os.path.getmtime(REGISTRY_FILE)
+
             # Check if file is stale immediately on startup
             if self._is_cache_stale():
                 print(
@@ -111,16 +118,21 @@ class TokenRegistry:
 
         # STEP 3: HARD REFRESH (The Last Resort)
         # Maybe it was listed 5 minutes ago? We force a refresh.
-        print(
-            f"[REGISTRY] Unknown token {addr_lower[:6]}... Checking remote updates..."
-        )
-        updated = await self._refresh_registry_if_needed(force=True)
+        if (time.time() - self.last_refresh_ts) > REFRESH_COOLDOWN:
+            print(
+                f"[REGISTRY] Unknown token {addr_lower[:6]}... Checking remote updates..."
+            )
+            updated = await self._refresh_registry_if_needed(force=True)
 
-        if updated:
-            # Check one last time
-            cg_id = self.lookup_map.get(platform, {}).get(addr_lower)
-            if cg_id:
-                return cg_id
+            if updated:
+                # Check one last time
+                cg_id = self.lookup_map.get(platform, {}).get(addr_lower)
+                if cg_id:
+                    return cg_id
+        else:
+            print(
+                f"[REGISTRY] Token {addr_lower[:6]} not found. Skipping refresh (Cooldown Active)."
+            )
 
         # STEP 4: BLACKLIST IT
         # CoinGecko doesn't know it. It's Spam. See you in 3 days spam.
@@ -137,6 +149,13 @@ class TokenRegistry:
         Fetches the massive JSON list from CoinGecko if cache is old.
         Returns True if a new fetch happened.
         """
+        time_since_last_update = time.time() - self.last_refresh_ts
+        if force and time_since_last_update < REFRESH_COOLDOWN:
+            print(
+                f"[REGISTRY] Refresh skipped. Last update was {int(time_since_last_update / 60)}m ago"
+            )
+            return False
+
         if self._is_cache_stale() or force:
             print("[REGISTRY] Downloading CoinGecko coin list")
             async with httpx.AsyncClient() as client:
@@ -152,6 +171,9 @@ class TokenRegistry:
                             json.dump(data, f)
 
                         self._build_fast_lookup(data)
+
+                        # Update timestamp
+                        self.last_refresh_ts = time.time()
                         return True
                     else:
                         print(
