@@ -1,3 +1,4 @@
+from typing import Optional
 import httpx
 import os
 import time
@@ -11,6 +12,7 @@ MISSING_FILE = "data/prices/missing_tokens.json"
 # Config
 CACHE_DURATION = 86400
 MISSING_TTL = 86400 * 3
+
 
 class TokenRegistry:
     """
@@ -35,25 +37,27 @@ class TokenRegistry:
         self._load_missing_cache()
         self.initialize_local()
 
-    def initialize_local(self):
+    def initialize_local(self) -> None:
         """
         Loads the big list from disk if it exists.
         """
         if os.path.exists(REGISTRY_FILE):
             # Check if file is stale immediately on startup
             if self._is_cache_stale():
-                print("[STARTUP] Local cache is old. Will fetch new one on first request.")
+                print(
+                    "[STARTUP] Local cache is old. Will fetch new one on first request."
+                )
             else:
                 with open(REGISTRY_FILE, "r") as f:
                     data = json.load(f)
                     self._build_fast_lookup(data)
 
-    def _load_missing_cache(self):
+    def _load_missing_cache(self) -> None:
         if os.path.exists(MISSING_FILE):
             with open(MISSING_FILE, "r") as f:
                 self.missing_map = json.load(f)
 
-    def _save_missing_cache(self):
+    def _save_missing_cache(self) -> None:
         with open(MISSING_FILE, "w") as f:
             json.dump(self.missing_map, f)
 
@@ -65,7 +69,7 @@ class TokenRegistry:
             return True
         return (time.time() - os.path.getmtime(REGISTRY_FILE)) > CACHE_DURATION
 
-    async def resolve_token(self, chain_id: str, address: str) -> optional[str]:
+    async def resolve_token(self, chain_id: str, address: str) -> Optional[str]:
         """
         Returns the CoinGecko API ID for a given address.
         Flow: Refresh Master List (if old) -> Check Master List -> Check Blacklist -> Hard Retry.
@@ -77,7 +81,7 @@ class TokenRegistry:
             return None
 
         addr_lower = address.lower()
-        
+
         # STEP 0: Auto-Update Master list
         # If the cache is > 24h old, we update it Now.
         # This ensures 'lookup_map' has the latest tokens before we search.
@@ -93,7 +97,7 @@ class TokenRegistry:
                 del self.missing_map[addr_lower]
                 self._save_missing_cache()
             return cg_id
-        
+
         # STEP 2: CHECK BLACKLIST (Smart Filtering)
         # Only reached if token is Not in the master list
         last_checked = self.missing_map.get(addr_lower)
@@ -107,8 +111,10 @@ class TokenRegistry:
 
         # STEP 3: HARD REFRESH (The Last Resort)
         # Maybe it was listed 5 minutes ago? We force a refresh.
-        print(f"[REGISTRY] Unknown token {addr_lower[:6]}... Checking remote updates...")
-        updated = await._refresh_registry_if_needed(force=True)
+        print(
+            f"[REGISTRY] Unknown token {addr_lower[:6]}... Checking remote updates..."
+        )
+        updated = await self._refresh_registry_if_needed(force=True)
 
         if updated:
             # Check one last time
@@ -116,14 +122,16 @@ class TokenRegistry:
             if cg_id:
                 return cg_id
 
-        # STEP 4: BLACKLIST IT 
+        # STEP 4: BLACKLIST IT
         # CoinGecko doesn't know it. It's Spam. See you in 3 days spam.
-        print(f"[REGISTRY] Token {addr_lower[:6]} is likely SPAM. Blacklisting for 3 days.")
+        print(
+            f"[REGISTRY] Token {addr_lower[:6]} is likely SPAM. Blacklisting for 3 days."
+        )
         self.missing_map[addr_lower] = time.time()
         self._save_missing_cache()
 
         return None
-        
+
     async def _refresh_registry_if_needed(self, force=False) -> bool:
         """
         Fetches the massive JSON list from CoinGecko if cache is old.
@@ -134,9 +142,8 @@ class TokenRegistry:
             async with httpx.AsyncClient() as client:
                 try:
                     resp = await client.get(
-                           COINGECKO_LIST_URL,
-                           params={"include_platform": True}
-                           )
+                        COINGECKO_LIST_URL, params={"include_platform": True}
+                    )
                     if resp.status_code == 200:
                         data = resp.json()
 
@@ -147,10 +154,27 @@ class TokenRegistry:
                         self._build_fast_lookup(data)
                         return True
                     else:
-                        print(f"[ERROR] CoinGecko List Fetch Failed: {resp.status_code}")
+                        print(
+                            f"[ERROR] CoinGecko List Fetch Failed: {resp.status_code}"
+                        )
                 except Exception as e:
                     print(f"[ERROR] Registry update failed: {e}")
         return False
 
-    def _build_fast_lookup(self, raw_data):
-        pass
+    def _build_fast_lookup(self, raw_data) -> None:
+        """
+        Converts raw list to O(1) Lookup.
+        """
+        print(f"[REGISTRY] Indexing {len(raw_data)} tokens...")
+        self.lookup_map = {}
+        for coin in raw_data:
+            platforms = coin.get("platforms", {})
+            coin_id = coin.get("id")
+            for platform, address in platforms.items():
+                if address:
+                    if platform not in self.lookup_map:
+                        self.lookup_map[platform] = {}
+                    self.lookup_map[platform][address.lower()] = coin_id
+
+
+token_registry = TokenRegistry()
