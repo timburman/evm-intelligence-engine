@@ -1,15 +1,15 @@
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 import httpx
 import json
 import os
 import asyncio
 import time
 
-from core.token_registry import COINGECKO_LIST_URL
 
 COINGECKO_API_URL = "https://api.coingecko.com/api/v3"
 RATE_LIMIT_DELAY = 2.5
 PRICE_TTL = 600
+CACHE_FILE = "data/prices/price_cache.json"
 
 
 class CoinGeckoClient:
@@ -23,31 +23,58 @@ class CoinGeckoClient:
     def __init__(self) -> None:
         # Structure: { "bitcoin": { "price": 60000, "timestamp": 23124134 } }
         self.price_cache: dict[str, dict] = {}
+        self._load_cache_from_disk()
 
-    async def stream_prices(self, token_ids: list[str]) -> AsyncGenerator[dict, None]:
-        """
-        Yields price objects one by one as they are processed.
-        This allows the frontend to start rendering immediately
-        """
+    def _load_cache_from_disk(self) -> None:
+        if os.path.exists(CACHE_FILE):
+            try:
+                with open(CACHE_FILE, "r") as f:
+                    self.price_cache = json.load(f)
+                print(f"[Price] Loaded {len(self.price_cache)} prices from disk cache")
+            except Exception as e:
+                print(f"[PRICE] cache load failed: {e}")
+                self.price_cache = {}
 
-        # 1. Deduplicate and Check Cache
+    def _save_cache_to_disk(self):
+        os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+        with open(CACHE_FILE, "w") as f:
+            json.dump(self.price_cache, f)
+
+    async def get_price_batches(
+        self, token_ids: list[str]
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """
+        Yields Batches of prices.
+        Batch 1: Immediate Cached Prices (Fast)
+        Batch 2...N: Fresh API Prices (Slower)
+        """
         unique_ids = list(set(token_ids))
+        if not unique_ids:
+            return
+
         to_fetch = []
+        cached_batch = {}
+        now = time.time()
 
+        # 1. Sort: Cache vs Needs-Fetch
         for tid in unique_ids:
-            cached = self.price_cache.get(tid)
-            now = time.time()
-
-            # If valid cache exists, yield it!
-            if cached and (now - cached["timestamp"] < PRICE_TTL):
-                yield {"id": tid, "price": cached["price"], "source": "cache"}
+            data = self.price_cache.get(tid)
+            # Check if exists AND is fresh (TTL)
+            if data and (now - data["ts"] < PRICE_TTL):
+                cached_batch[tid] = data["price"]
             else:
                 to_fetch.append(tid)
 
+        # 2. Yield Cached Batch Immediately (0ms Latency)
+        if cached_batch:
+            # yield metadata so main.py knows source
+            yield {"data": cached_batch, "source": "cache"}
+
+        # 3. Fetch Missing in Chunks
         if not to_fetch:
             return
 
-        print(f"[PRICE] Fetching fresh prices for {len(to_fetch)} assets...")
+        print(f"[PRICE] Fetching {len(to_fetch)} fresh prices...")
 
         chunk_size = 50
         async with httpx.AsyncClient() as client:
@@ -57,36 +84,45 @@ class CoinGeckoClient:
 
                 try:
                     resp = await client.get(
-                        f"{COINGECKO_LIST_URL}/simple/price",
+                        f"{COINGECKO_API_URL}/simple/price",
                         params={"ids": chunk_str, "vs_currencies": "usd"},
                     )
+
                     if resp.status_code == 200:
-                        data = resp.json()
+                        api_data = resp.json()
 
+                        fresh_batch = {}
                         for tid in chunk:
-                            if tid in data:
-                                price = data[tid].get("usd", 0.0)
+                            if tid in api_data:
+                                price = api_data[tid].get("usd", 0.0)
+                                fresh_batch[tid] = price
 
+                                # Update Internal Cache
                                 self.price_cache[tid] = {
                                     "price": price,
-                                    "timestamp": time.time(),
+                                    "ts": time.time(),
                                 }
-                                yield {"id": tid, "price": price, "source": "api"}
                             else:
-                                yield {"id": tid, "price": 0.0, "source": "error"}
+                                fresh_batch[tid] = 0.0
+
+                        # Save to Disk after every successful fetch (Safety)
+                        self._save_cache_to_disk()
+
+                        yield {"data": fresh_batch, "source": "api"}
                     elif resp.status_code == 429:
-                        print("[WARN] Rate Limit! Serving stale data if available...")
-                        # Fallback: Check if we have old cache for this chunk
+                        print("[WARN] Rate Limit! Using Stale Cache if available.")
+
+                        # Emergency: Try to yield stale data for this chunk
+                        stale_batch = {}
                         for tid in chunk:
                             if tid in self.price_cache:
-                                yield {
-                                    "id": tid,
-                                    "price": self.price_cache[tid]["price"],
-                                    "source": "stale_cache",
-                                }
+                                stale_batch[tid] = self.price_cache[tid]["price"]
+                        if stale_batch:
+                            yield {"data": stale_batch, "source": "stale_cache"}
+
                         await asyncio.sleep(10)
                 except Exception as e:
-                    print(f"[Error] Batch failed: {e}")
+                    print(f"[ERROR] Batch failed: {e}")
 
                 if i + chunk_size < len(to_fetch):
                     await asyncio.sleep(RATE_LIMIT_DELAY)
