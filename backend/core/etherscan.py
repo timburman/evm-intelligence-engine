@@ -97,15 +97,19 @@ async def _sync_category(
         data = resp.json()
 
         if data["status"] == "1":
-            new_txs = data["results"]
+            new_txs = data["result"]
             if new_txs:
-                new_max_block = max(int(tx["blocknumber"]) for tx in new_txs)
+                new_max_block = max(int(tx["blockNumber"]) for tx in new_txs)
                 return new_txs, new_max_block
             return [], last_block
         elif data["message"] == "No transactions found":
             return [], last_block
         else:
-            print(f"[Warning] API Note [{action}: {data['message']}]")
+            error_reason = data.get("result", "Unknown Error")
+            print(f"[API ERROR] {action}: {data['message']} -> {error_reason}")
+
+            if "API Key" in str(error_reason):
+                print("[CRITICAL]: Etherscan API KEY is missing or invalid")
             return [], last_block
     except Exception as e:
         print(f"[ERROR] Connection failed in {action}: {e}")
