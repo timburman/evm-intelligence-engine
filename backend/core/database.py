@@ -28,6 +28,21 @@ class DatabaseClient:
 
         print(f"[DB] Preparing to save {len(parsed_txs)} transactions...")
 
+        # Step 0: Upsert Wallet
+        # We must ensure the user exists before we add their histroy
+        first_tx = next(iter(parsed_txs.values()))
+        wallet_address = first_tx["wallet_address"]
+
+        try:
+            self.supabase.table("wallets").upsert(
+                {"address": wallet_address, "label": "Imported Wallet"},
+                on_conflict="address",
+            ).execute()
+            print(f"[DB] Wallet {wallet_address[:6]}... synced.")
+        except Exception as e:
+            print(f"[DB] Failed to create wallet: {e}")
+            return
+
         # We need to convert the nested dictionary into flat lists for SQL
 
         tx_rows = []
@@ -71,8 +86,8 @@ class DatabaseClient:
                         "contract_address": transfer["token_address"],
                         "chain_id": tx["chain_id"],
                         "symbol": transfer["token_symbol"],
-                        # Leaving name/decimal null for now
-                        # We'd fetch these from RPC or Registry
+                        "name": transfer["token_symbol"],
+                        "decimals": 18,
                     }
 
         # -- Batch Execution --
@@ -90,11 +105,10 @@ class DatabaseClient:
             self._batch_upsert("transactions", tx_rows)
 
             # Step C: Upsert Transfers
-            # Note: We delete old transfers for these TXs first to avoid duplication bugs
-            # (Simple for MVP)
-            # For now, just append. In production, we'll handle ID Conflicts
-            self.supabase.table("token_transfers").insert(transfer_rows).execute()
-            print(f"[DB] Inserted {len(transfer_rows)} transfers.")
+            if transfer_rows:
+                self._batch_upsert("token_transfers", transfer_rows)
+
+            print(f"[DB] Batch Complete for {wallet_address}")
 
         except Exception as e:
             print(f"[DB] Database Error: {e}")
@@ -103,6 +117,8 @@ class DatabaseClient:
         """
         Helper to break big lists into chunks of 1000.
         """
+        if not data:
+            return
         chunk_size = 1000
         for i in range(0, len(data), chunk_size):
             chunk = data[i : i + chunk_size]
