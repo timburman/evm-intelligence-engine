@@ -49,7 +49,12 @@ class DatabaseClient:
         transfer_rows = []
         tokens_seen = {}  # mapping (address -> token_info)
 
+        # We need a clean list of hashes
+        tx_hashes = []
+
         for tx_hash, tx in parsed_txs.items():
+            tx_hashes.append(tx_hash)
+
             tx_rows.append(
                 {
                     "tx_hash": tx["tx_hash"],
@@ -81,7 +86,16 @@ class DatabaseClient:
                     }
                 )
 
-                if transfer["token_address"] != "NATIVE":
+                if transfer["token_address"] == "NATIVE":
+                    tokens_seen["NATIVE"] = {
+                        "contract_address": "NATIVE",
+                        "chain_id": tx["chain_id"],
+                        "symbol": "ETH",  # Hardcore for Mainnet (Future: it would be dynamic)
+                        "name": "Native Ether",
+                        "decimals": 18,
+                    }
+
+                else:
                     tokens_seen[transfer["token_address"]] = {
                         "contract_address": transfer["token_address"],
                         "chain_id": tx["chain_id"],
@@ -106,6 +120,15 @@ class DatabaseClient:
 
             # Step C: Upsert Transfers
             if transfer_rows:
+                # 1. Delete existing transfers for these transactions
+                # This prevents duplicates if run the script twice.
+                # We do this in chunks to avoid URL length limits
+                chunk_size = 200
+                for i in range(0, len(tx_hashes), chunk_size):
+                    batch_hashes = tx_hashes[i : i + chunk_size]
+                    self.supabase.table("token_transfers").delete().in_(
+                        "tx_hash", batch_hashes
+                    ).execute()
                 self._batch_upsert("token_transfers", transfer_rows)
 
             print(f"[DB] Batch Complete for {wallet_address}")
