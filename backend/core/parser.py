@@ -116,6 +116,9 @@ class TransactionParser:
 
         return parsed_txs
 
+    def parse_dict(self, raw_data: dict[str, Any]) -> dict[str, Any]:
+        pass
+
     # Helper Functions
 
     def _to_decimal(self, raw_value: int, decimals: int) -> float:
