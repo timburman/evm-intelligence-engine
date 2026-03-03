@@ -19,11 +19,11 @@ async def fetch_all_txs(address: str, chain_id: str = "1") -> dict:
     filename = f"data/raw_txs/{address}_{chain_id}.json"
 
     if os.path.exists(filename):
-        print(f"Loading {address} from cache")
+        print(f"[INFO] Loading {address} from cache")
         with open(filename, "r") as f:
             cache = json.load(f)
     else:
-        print(f"New wallet detected: {address}")
+        print(f"[INFO] New wallet detected: {address}")
         cache = {
             "metadata": {
                 "chain_id": chain_id,
@@ -35,6 +35,8 @@ async def fetch_all_txs(address: str, chain_id: str = "1") -> dict:
             "erc20": [],
         }
 
+    delta = {"metadata": cache["metadata"], "normal": [], "internal": [], "erc20": []}
+
     async with httpx.AsyncClient() as client:
         # Sync Normal transactions
         last_normal = cache["metadata"]["last_blocks"]["normal"]
@@ -44,6 +46,7 @@ async def fetch_all_txs(address: str, chain_id: str = "1") -> dict:
         if new_normal:
             cache["normal"].extend(new_normal)
             cache["metadata"]["last_blocks"]["normal"] = last_block_n
+            delta["normal"].extend(new_normal)
 
         # Sync Internal Transactions
         last_internal = cache["metadata"]["last_blocks"]["internal"]
@@ -53,6 +56,7 @@ async def fetch_all_txs(address: str, chain_id: str = "1") -> dict:
         if new_internal:
             cache["internal"].extend(new_internal)
             cache["metadata"]["last_blocks"]["internal"] = last_block_i
+            cache["internal"].extend(new_internal)
 
         # Sync ERC20 Transactions
         last_erc20 = cache["metadata"]["last_blocks"]["erc20"]
@@ -62,11 +66,14 @@ async def fetch_all_txs(address: str, chain_id: str = "1") -> dict:
         if new_erc20:
             cache["erc20"].extend(new_erc20)
             cache["metadata"]["last_blocks"]["erc20"] = last_block_e
+            delta["erc20"].extend(new_erc20)
 
     with open(filename, "w") as f:
         json.dump(cache, f, indent=2)
 
-    summary = f"Synced: +{len(new_normal)} Normal, +{len(new_internal)} Internal, +{len(new_erc20)} ERC20"
+    cache["_delta"] = delta
+
+    summary = f"Synced: +{len(delta['normal'])} Normal, +{len(delta['internal'])} Internal, +{len(delta['erc20'])} ERC20"
     print(f"[Success] {summary}")
 
     return cache
