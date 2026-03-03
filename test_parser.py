@@ -10,6 +10,7 @@ def main():
     # 1. Parse
     result = parser.parse_file(TEST_FILE)
     
+    
     # 2. Inspect a random transaction
     if result:
         first_tx = list(result.values())[0]
@@ -19,6 +20,22 @@ def main():
         print(json.dumps(first_tx, indent=2, default=str))
     else:
         print("❌ Parsing failed or empty file.")
+
+
+    with open(TEST_FILE, "r") as f:
+        raw_data = json.load(f)
+
+    result2 = parser.parse_dict(raw_data)
+    if result2:
+        first_tx = list(result2.values())[0]
+        print("\n✅ Successfully Parsed!")
+        print(f"Total Transactions: {len(result)}")
+        print("\n--- Sample Transaction ---")
+        print(json.dumps(first_tx, indent=2, default=str))
+    else:
+        print("❌ Parsing failed or empty file.")
+
+  
 
 if __name__ == "__main__":
     main()
