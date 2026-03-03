@@ -25,7 +25,26 @@ class TransactionParser:
         chain_id = raw_data.get("metadata", {}).get("chain_id", "1")
         wallet_address = raw_data.get("metadata", {}).get("address", "").lower()
 
-        # Map tx_has -> Transaction Object
+        return self._parse_transactions(raw_data, chain_id, wallet_address)
+
+    def parse_dict(self, raw_data: dict[str, Any]) -> dict[str, Any]:
+        """
+        Parses a dictionary object directly (for Deltas)
+        """
+        chain_id = raw_data.get("metadata", {}).get("chain_id", "1")
+        wallet_address = raw_data.get("metadata", {}).get("address", "").lower()
+
+        return self._parse_transactions(raw_data, chain_id, wallet_address)
+
+    # Helper Functions
+
+    def _parse_transactions(
+        self, raw_data: dict[str, Any], chain_id: str, wallet_address: str
+    ) -> dict[str, Any]:
+        """
+        Parses all the raw_data into structured format.
+        Ready for database insertion.
+        """
         parsed_txs = {}
 
         # 1. Process Normal Transactions (The Parent Rows)
@@ -115,11 +134,6 @@ class TransactionParser:
             )
 
         return parsed_txs
-
-    def parse_dict(self, raw_data: dict[str, Any]) -> dict[str, Any]:
-        pass
-
-    # Helper Functions
 
     def _to_decimal(self, raw_value: int, decimals: int) -> float:
         """
