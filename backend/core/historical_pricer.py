@@ -132,3 +132,15 @@ class HistoricalPricer:
                 print(f"[ERROR] DefiLlama connect error: {e}")
 
         return 0.0
+
+    def _update_cache(self, coin_id: str, cache_key: str, price: float):
+        """
+        Saves successfully fetched data to disk
+        """
+        if coin_id not in self.historical_cache:
+            self.historical_cache[coin_id] = {}
+        self.historical_cache[coin_id][cache_key] = price
+        self._save_cache()
+
+
+historical_pricer = HistoricalPricer()
