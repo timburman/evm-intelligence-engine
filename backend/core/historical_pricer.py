@@ -87,3 +87,26 @@ class HistoricalPricer:
 
         print(f"[ERROR] Both APIs failed to find {coin_id} on {cache_key}.")
         return 0.0
+
+    async def _fetch_coingecko(self, coin_id: str, cg_date: str) -> float:
+        """
+        Hits the CoinGecko Historical API
+        """
+        url = CG_HISTORY_URL.format(id=coin_id)
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.get(
+                    url, params={"date": cg_date, "localization": "false"}
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return (
+                        data.get("market_data", {})
+                        .get("current_price", {})
+                        .get("usd", 0.0)
+                    )
+                elif resp.status_code == 429:
+                    print("[WARN] CoinGecko Rate Limit Hit!")
+            except Exception as e:
+                print(f"[ERROR] CoinGecko connect error: {e}")
+        return 0.0
