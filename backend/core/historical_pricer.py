@@ -110,3 +110,25 @@ class HistoricalPricer:
             except Exception as e:
                 print(f"[ERROR] CoinGecko connect error: {e}")
         return 0.0
+
+    async def _fetch_defillama(self, coin_id: str, unix_ts: int) -> float:
+        """
+        Hits the DefiLlama Historical API using the 'coingecko' prefix trick.
+        """
+        query_id = f"coingecko:{coin_id}"
+        url = LLAMA_HISTORY_URL.format(
+            timestamp=unix_ts, prefix="coingecko", id=coin_id
+        )
+
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.get(url)
+
+                if resp.status_code == 200:
+                    data = resp.json()
+
+                    return data.get("coins", {}).get(query_id, {}).get("price", 0.0)
+            except Exception as e:
+                print(f"[ERROR] DefiLlama connect error: {e}")
+
+        return 0.0
