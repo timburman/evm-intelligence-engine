@@ -41,7 +41,7 @@ class HistoricalPricer:
         Takes '2023-05-15 14:30:00' and creates the formats needed for APIs.
         Returns: (cache_key, cg_date, unix_timestamp)
         """
-        dt = datetime.strptime(sql_timestamp, "%Y-%m-%d %H:%M%S").replace(
+        dt = datetime.strptime(sql_timestamp, "%Y-%m-%d %H:%M:%S").replace(
             tzinfo=timezone.utc
         )
 
