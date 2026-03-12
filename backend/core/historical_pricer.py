@@ -9,6 +9,16 @@ CG_HISTORY_URL = "https://api.coingecko.com/api/v3/coins/{id}/history"
 LLAMA_HISTORY_URL = "https://coins.llama.fi/prices/historical/{timestamp}/{prefix}:{id}"
 HISTORY_CACHE_FILE = "data/prices/historical_cache.json"
 
+KNOWN_STABLECOINS = {
+    "usd-coin",
+    "tether",
+    "dai",
+    "frax",
+    "binance-usd",
+    "true-usd",
+    "liquidity-usd",
+}
+
 
 class HistoricalPricer:
     """
@@ -59,6 +69,9 @@ class HistoricalPricer:
         """
         if not coin_id:
             return 0.0
+
+        if coin_id in KNOWN_STABLECOINS:
+            return 1.0
 
         cache_key, cg_date, unix_ts = self._parse_dates(sql_timestamp)
 
