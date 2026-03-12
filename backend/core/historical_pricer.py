@@ -1,7 +1,6 @@
 from os.path import exists
 from typing import Optional
 import httpx
-import asyncio
 import json
 import os
 from datetime import datetime, timezone
@@ -41,7 +40,9 @@ class HistoricalPricer:
         Takes '2023-05-15 14:30:00' and creates the formats needed for APIs.
         Returns: (cache_key, cg_date, unix_timestamp)
         """
-        dt = datetime.strptime(sql_timestamp, "%Y-%m-%d %H:%M:%S").replace(
+        clean_ts = sql_timestamp.replace("T", " ").split("+")[0].split(".")[0]
+
+        dt = datetime.strptime(clean_ts, "%Y-%m-%d %H:%M:%S").replace(
             tzinfo=timezone.utc
         )
 
