@@ -51,9 +51,7 @@ def backfill_coin(coin_id: str, ticker: str):
             chunk = db_rows[i : i + 1000]
             db.supabase.table("daily_prices").upsert(chunk).execute()
 
-        print(
-            f"[{coin_id}] Successfully backfilled {len(db_rows)} days of history!"
-        )
+        print(f"[{coin_id}] Successfully backfilled {len(db_rows)} days of history!")
     except Exception as e:
         print(f"[{coin_id}] Error: {e}")
 
