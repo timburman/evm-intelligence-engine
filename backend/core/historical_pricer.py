@@ -15,6 +15,10 @@ KNOWN_STABLECOINS = {
     "binance-usd",
     "true-usd",
     "liquidity-usd",
+    # Mainnet Contract Addresses:
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",  # USDC
+    "0xdac17f958d2ee523a2206206994597c13d831ec7",  # USDT
+    "0x6b175474e89094c44da98b954eedeac495271d0f",  # DAI
 }
 
 MAJOR_COINS = {"ethereum", "polygon-ecosystem-token", "binancecoin"}
@@ -148,7 +152,10 @@ class HistoricalPricer:
         """
         Hits the DefiLlama Historical API using the 'coingecko' prefix trick.
         """
-        query_id = f"coingecko:{coin_id}"
+        if coin_id.startswith("0x"):
+            query_id = f"ethereum:{coin_id.lower()}"
+        else:
+            query_id = f"coingecko:{coin_id}"
         url = LLAMA_HISTORY_URL.format(
             timestamp=unix_ts, prefix="coingecko", id=coin_id
         )
