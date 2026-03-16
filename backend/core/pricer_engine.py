@@ -86,5 +86,81 @@ class PricerEngine:
         except Exception as e:
             print(f"[ENGINE] Error updating gas costs: {e}")
 
+    async def update_token_transfers(self):
+        """
+        Finds unpriced token transfers and calculates their historical USD value.
+        """
+        print("[ENGINE] Scanning for unpriced token transfers...")
+
+        try:
+            # 1. Fetch unpriced transfers
+            response = (
+                db.supabase.table("token_transfers")
+                .select("id, tx_hash, token_address, amount_decimal")
+                .is_("price_at_transaction", "null")
+                .limit(1000)
+                .execute()
+            )
+
+            transfers = cast(list[dict[str, Any]], response.data)
+
+            if not transfers:
+                print("[ENGINE] All token transfers are priced!")
+                return
+
+            print(f"[ENGINE] Pricing {len(transfers)} token transfers...")
+
+            # 2. Grab the timestamp from transactions
+            tx_hashes = list(set([t["tx_hash"] for t in transfers]))
+            tx_resp = (
+                db.supabase.table("transactions")
+                .select("tx_hash, timestamp, chain_id")
+                .in_("tx_hash", tx_hashes)
+                .execute()
+            )
+
+            tx_map = {tx["tx_hash"]: tx for tx in tx_resp.data}
+            updates = []
+
+            # 3. Process each transfer
+            for t in transfers:
+                tx_data = tx_map.get(t["tx_hash"])
+                if not tx_data:
+                    continue
+
+                # Determine what to ask the TM(Time Machine)
+                if t["token_address"] == "NATIVE":
+                    coin_id = self.chain_coin_map.get(
+                        str(tx_data["chain_id"]), "ethereum"
+                    )
+                else:
+                    coin_id = str(t["token_address"])
+
+                price = await historical_pricer.get_historical_price(
+                    coin_id, str(tx_data["timestamp"])
+                )
+                if price > 0:
+                    amount = float(t["amount_decimal"])
+                    value_usd = round(amount * price, 2)
+
+                    updates.append(
+                        {
+                            "id": t["id"],
+                            "price_at_transaction": price,
+                            "value": value_usd,
+                        }
+                    )
+
+            # 4. Batch Update Supabase
+            if updates:
+                print(f"[ENGINE] Saving {len(updates)} calculated token value to DB")
+                for i in range(0, len(updates), 500):
+                    chunk = updates[i : i + 500]
+                    db.supabase.table("token_transfers").upsert(chunk).execute()
+
+                print("[ENGINE] Token transfer pricing batch compelte!")
+        except Exception as e:
+            print(f"[ENGINE] Error updating transfer prices: {e}")
+
 
 pricer_engine = PricerEngine()
