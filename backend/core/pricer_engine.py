@@ -1,6 +1,7 @@
 from typing import Any, cast
 from backend.core.historical_pricer import historical_pricer
 from backend.core.database import db
+from backend.core.token_registry import token_registry
 
 
 class PricerEngine:
@@ -46,11 +47,22 @@ class PricerEngine:
 
             # 2. Process each transaction
             for tx in txs:
+                # If they are just the receiver, they paid $0 in gas.
+                if str(tx["from_address"]).lower() != str(tx["wallet_address"]).lower():
+                    updates.append(
+                        {
+                            "tx_hash": str(tx["tx_hash"]),
+                            "chain_id": str(tx["chain_id"]),
+                            "gas_cost_usd": 0.0,  # Force 0 so we don't scan it again
+                        }
+                    )
+                    continue
+
                 coin_id = self.chain_coin_map.get(tx["chain_id"], "ethereum")
 
                 # Use historical_pricer
                 price = await historical_pricer.get_historical_price(
-                    coin_id, tx["timestamp"]
+                    coin_id, str(tx["timestamp"])
                 )
 
                 if price > 0:
@@ -59,7 +71,7 @@ class PricerEngine:
                     gas_price = int(tx["gas_price"])
 
                     gas_native = (gas_used * gas_price) / (10**18)
-                    gas_used = round(gas_native * price, 2)
+                    gas_used = round(gas_native * price, 4)
 
                     # Prepare the row for updating..
                     # Upsert requires the Primary Keys (tx_hash, chain_id) to know which row to update.
@@ -112,14 +124,23 @@ class PricerEngine:
 
             # 2. Grab the timestamp from transactions
             tx_hashes = list(set([t["tx_hash"] for t in transfers]))
-            tx_resp = (
-                db.supabase.table("transactions")
-                .select("tx_hash, timestamp, chain_id")
-                .in_("tx_hash", tx_hashes)
-                .execute()
-            )
+            tx_map = {}
 
-            tx_map = {tx["tx_hash"]: tx for tx in tx_resp.data}
+            print(
+                f"[ENGINE] Fetching timestamps for {len(tx_hashes)} unique transactions"
+            )
+            for i in range(0, len(tx_hashes), 50):
+                chunk = tx_hashes[i : i + 50]
+                tx_resp = (
+                    db.supabase.table("transactions")
+                    .select("tx_hash, timestamp, chain_id")
+                    .in_("tx_hash", chunk)
+                    .execute()
+                )
+
+                for tx in tx_resp.data:
+                    tx_map[tx["tx_hash"]] = tx
+
             updates = []
 
             # 3. Process each transfer
@@ -128,13 +149,20 @@ class PricerEngine:
                 if not tx_data:
                     continue
 
+                chain_id = str(tx_data["chain_id"])
+                token_addr = str(t["token_address"])
+
                 # Determine what to ask the TM(Time Machine)
-                if t["token_address"] == "NATIVE":
+                if token_addr == "NATIVE":
                     coin_id = self.chain_coin_map.get(
                         str(tx_data["chain_id"]), "ethereum"
                     )
                 else:
-                    coin_id = str(t["token_address"])
+                    coin_id = await token_registry.resolve_token(chain_id, token_addr)
+
+                if not coin_id:
+                    print(f"[ENGINE] Spam/Unknown Token blocked: {token_addr}")
+                    continue
 
                 price = await historical_pricer.get_historical_price(
                     coin_id, str(tx_data["timestamp"])
@@ -147,7 +175,7 @@ class PricerEngine:
                         {
                             "id": t["id"],
                             "price_at_transaction": price,
-                            "value": value_usd,
+                            "value_usd": value_usd,
                         }
                     )
 
