@@ -114,9 +114,20 @@ class TransactionParser:
             parent_hash = tx.get("hash")
 
             if parent_hash not in parsed_txs:
-                # In an Indexer, we would create a "Stub" transaction here.
-                # For Week 2, we skip orphans.
-                continue
+                # Create a Stub transaction for orphaned ERC-20 transfers
+                parsed_txs[parent_hash] = {
+                    "tx_hash": parent_hash,
+                    "chain_id": chain_id,
+                    "wallet_address": wallet_address,
+                    "block_number": int(tx.get("blockNumber", 0) or 0),
+                    "timestamp": self._parse_timestamp(tx.get("timeStamp")),
+                    "from_address": "unknown",
+                    "to_address": "unknown",
+                    "gas_used": int(tx.get("gasUsed", 0) or 0),
+                    "gas_price": int(tx.get("gasPrice", 0) or 0),
+                    "gas_cost_native": self._calculate_gas_cost(tx),
+                    "transfers": [],
+                }
 
             token_value = int(tx.get("value", 0))
             decimals = int(tx.get("tokenDecimal", 0))
