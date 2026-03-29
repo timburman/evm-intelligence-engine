@@ -1,111 +1,24 @@
-from typing import Any, cast
-from backend.core.historical_pricer import historical_pricer
+import asyncio
+from typing import List, Dict, Any, cast
 from backend.core.database import db
+from backend.core.historical_pricer import historical_pricer
 from backend.core.token_registry import token_registry
+from backend.core.gecko_terminal import gt_client
 
 
 class PricerEngine:
-    """
-    Scans the database for unpriced data, calculates USD values,
-    and writes them back.
-    """
-
-    def __init__(self) -> None:
-        # Maps chain_id to the native token's CoinGecko ID
+    def __init__(self):
         self.chain_coin_map = {
             "1": "ethereum",
             "137": "polygon-ecosystem-token",
             "42161": "ethereum",
-            "56": "binance-smart-chain",
+            "56": "binancecoin",
         }
 
-    async def update_gas_costs(self):
-        """
-        Finds Transactions with 0 gas cost and calculates their historical USD value.
-        """
-        print("[ENGINE] Scanning for unpriced gas costs")
-
-        try:
-            # 1. Fetch up to 1000 upriced transactions
-            # We select only the columns we need to save memory
-            response = (
-                db.supabase.table("transactions")
-                .select("tx_hash, chain_id, timestamp, gas_used, gas_price")
-                .eq("gas_cost_usd", 0)
-                .limit(1000)
-                .execute()
-            )
-
-            txs = cast(list[dict[str, Any]], response.data)
-
-            if not txs:
-                print("[ENGINE] All gas costs are up to date!")
-                return
-
-            print(f"[ENGINE] Pricing {len(txs)} transactions...")
-            updates = []
-
-            # 2. Process each transaction
-            for tx in txs:
-                # If they are just the receiver, they paid $0 in gas.
-                if str(tx["from_address"]).lower() != str(tx["wallet_address"]).lower():
-                    updates.append(
-                        {
-                            "tx_hash": str(tx["tx_hash"]),
-                            "chain_id": str(tx["chain_id"]),
-                            "gas_cost_usd": 0.0,  # Force 0 so we don't scan it again
-                        }
-                    )
-                    continue
-
-                coin_id = self.chain_coin_map.get(tx["chain_id"], "ethereum")
-
-                # Use historical_pricer
-                price = await historical_pricer.get_historical_price(
-                    coin_id, str(tx["timestamp"])
-                )
-
-                if price > 0:
-                    # Math: (gas_used * gas_price) gives us Wei. Divide by 10^18 to get eth.. yay!
-                    gas_used = int(tx["gas_used"])
-                    gas_price = int(tx["gas_price"])
-
-                    gas_native = (gas_used * gas_price) / (10**18)
-                    gas_used = round(gas_native * price, 4)
-
-                    # Prepare the row for updating..
-                    # Upsert requires the Primary Keys (tx_hash, chain_id) to know which row to update.
-                    updates.append(
-                        {
-                            "tx_hash": tx["tx_hash"],
-                            "chain_id": tx["chain_id"],
-                            "gas_cost_usd": gas_used,
-                        }
-                    )
-
-            # 3. batch update supabase
-            if updates:
-                print(
-                    f"[ENGINE] Saving {len(updates)} calculated gas costs to database"
-                )
-                # We chunk it into 500s just to be safe
-                for i in range(0, len(updates), 500):
-                    chunk = updates[i : i + 500]
-                    db.supabase.table("transactions").upsert(chunk).execute()
-
-                print("[ENGINE] Gas pricing batch complete!")
-
-        except Exception as e:
-            print(f"[ENGINE] Error updating gas costs: {e}")
-
     async def update_token_transfers(self):
-        """
-        Finds unpriced token transfers and calculates their historical USD value.
-        """
-        print("[ENGINE] Scanning for unpriced token transfers...")
+        print("\n[ENGINE] 🔍 Scanning for unpriced token transfers...")
 
         try:
-            # 1. Fetch unpriced transfers
             response = (
                 db.supabase.table("token_transfers")
                 .select("id, tx_hash, token_address, amount_decimal")
@@ -114,21 +27,16 @@ class PricerEngine:
                 .execute()
             )
 
-            transfers = cast(list[dict[str, Any]], response.data)
-
+            transfers = cast(List[Dict[str, Any]], response.data)
             if not transfers:
-                print("[ENGINE] All token transfers are priced!")
+                print("[ENGINE] ✅ All token transfers are priced!")
                 return
 
-            print(f"[ENGINE] Pricing {len(transfers)} token transfers...")
+            print(f"[ENGINE] ⚡ Processing {len(transfers)} token transfers...")
 
-            # 2. Grab the timestamp from transactions
+            # 1. Grab timestamps in chunks
             tx_hashes = list(set([t["tx_hash"] for t in transfers]))
             tx_map = {}
-
-            print(
-                f"[ENGINE] Fetching timestamps for {len(tx_hashes)} unique transactions"
-            )
             for i in range(0, len(tx_hashes), 50):
                 chunk = tx_hashes[i : i + 50]
                 tx_resp = (
@@ -137,13 +45,15 @@ class PricerEngine:
                     .in_("tx_hash", chunk)
                     .execute()
                 )
-
                 for tx in tx_resp.data:
                     tx_map[tx["tx_hash"]] = tx
 
-            updates = []
+            unique_requests = set()
+            transfer_context = []
 
-            # 3. Process each transfer
+            # 2. Resolve Tokens
+            from datetime import datetime, timezone
+
             for t in transfers:
                 tx_data = tx_map.get(t["tx_hash"])
                 if not tx_data:
@@ -151,44 +61,100 @@ class PricerEngine:
 
                 chain_id = str(tx_data["chain_id"])
                 token_addr = str(t["token_address"])
+                
+                try:
+                    # Clean the ISO timestamp and convert to integer Unix timestamp
+                    clean_ts = str(tx_data["timestamp"]).replace("T", " ").split("+")[0].split(".")[0]
+                    dt = datetime.strptime(clean_ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                    timestamp = int(dt.timestamp())
+                except Exception as e:
+                    print(f"[ENGINE] ❌ Failed to parse timestamp {tx_data['timestamp']}: {e}")
+                    continue
 
-                # Determine what to ask the TM(Time Machine)
+                # Round to nearest 5 minutes (300 seconds) for API compression
+                rounded_timestamp = timestamp - (timestamp % 300)
+
                 if token_addr == "NATIVE":
-                    coin_id = self.chain_coin_map.get(
-                        str(tx_data["chain_id"]), "ethereum"
-                    )
+                    coin_id = self.chain_coin_map.get(chain_id, "ethereum")
                 else:
                     coin_id = await token_registry.resolve_token(chain_id, token_addr)
 
                 if not coin_id:
-                    print(f"[ENGINE] Spam/Unknown Token blocked: {token_addr}")
                     continue
 
-                price = await historical_pricer.get_historical_price(
-                    coin_id, str(tx_data["timestamp"])
-                )
-                if price > 0:
-                    amount = float(t["amount_decimal"])
-                    value_usd = round(amount * price, 2)
+                unique_requests.add((chain_id, token_addr, coin_id, rounded_timestamp))
+                transfer_context.append((t, coin_id, rounded_timestamp))
 
+            print(
+                f"[ENGINE] 🧠 Compressed to {len(unique_requests)} unique price queries."
+            )
+
+            # 3. The Waterfall Fetcher (DefiLlama -> GeckoTerminal)
+            sem = asyncio.Semaphore(
+                10
+            )  # Bumped up to 10 since we handle timeouts better
+            price_map = {}
+
+            async def waterfall_fetch(chain_id, token_addr, coin, ts):
+                async with sem:
+                    # 💧 LAYER 1: DefiLlama (Fast, but strict)
+                    price = await historical_pricer.get_historical_price(coin, ts)
+
+                    # 💧 LAYER 2: GeckoTerminal OHLCV Fallback
+                    if price <= 0 and token_addr != "NATIVE":
+                        print(
+                            f"[GT] 🔄 DefiLlama missed {coin}. Falling back to GeckoTerminal..."
+                        )
+                        pool_addr = await gt_client.get_top_pool(chain_id, token_addr)
+                        if pool_addr:
+                            price = await gt_client.get_historical_candle(
+                                chain_id, pool_addr, ts
+                            )
+
+                    # 💧 LAYER 3: Database Daily Candle Fallback
+                    if price <= 0:
+                        price = await historical_pricer.get_database_daily_fallback(coin, ts)
+
+                    return (coin, ts, price)
+
+            # Fire the waterfall
+            tasks = [
+                waterfall_fetch(c_id, t_addr, coin, ts)
+                for c_id, t_addr, coin, ts in unique_requests
+            ]
+            results = await asyncio.gather(*tasks)
+
+            for coin, ts, price in results:
+                price_map[(coin, ts)] = price
+
+            # 4. Map Prices Back to Transfers
+            updates = []
+            for t, coin_id, ts in transfer_context:
+                price = price_map.get((coin_id, ts), -1.0)
+
+                if price >= 0:
+                    amount = float(t["amount_decimal"])
                     updates.append(
                         {
                             "id": t["id"],
                             "price_at_transaction": price,
-                            "value_usd": value_usd,
+                            "value_usd": round(amount * price, 2),
                         }
                     )
 
-            # 4. Batch Update Supabase
+            # 5. Batch Update Supabase
             if updates:
-                print(f"[ENGINE] Saving {len(updates)} calculated token value to DB")
+                print(
+                    f"[ENGINE] 💾 Saving {len(updates)} calculated token values to DB..."
+                )
                 for i in range(0, len(updates), 500):
-                    chunk = updates[i : i + 500]
-                    db.supabase.table("token_transfers").upsert(chunk).execute()
+                    db.supabase.table("token_transfers").upsert(
+                        updates[i : i + 500]
+                    ).execute()
+                print("[ENGINE] ✅ Token transfer pricing batch complete!")
 
-                print("[ENGINE] Token transfer pricing batch compelte!")
         except Exception as e:
-            print(f"[ENGINE] Error updating transfer prices: {e}")
+            print(f"[ENGINE] ❌ Error updating transfer prices: {e}")
 
 
 pricer_engine = PricerEngine()
