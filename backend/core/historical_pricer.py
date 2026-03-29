@@ -4,7 +4,7 @@ import os
 from datetime import datetime, timezone
 from backend.core.database import db
 
-LLAMA_HISTORY_URL = "https://coins.llama.fi/prices/historical/{timestamp}/{prefix}:{id}"
+LLAMA_HISTORY_URL = "https://coins.llama.fi/prices/historical/{timestamp}/{query_id}"
 HISTORY_CACHE_FILE = "data/prices/historical_cache.json"
 
 KNOWN_STABLECOINS = {
@@ -48,24 +48,21 @@ class HistoricalPricer:
         with open(HISTORY_CACHE_FILE, "w") as f:
             json.dump(self.historical_cache, f)
 
-    def _parse_dates(self, sql_timestamp: str) -> tuple:
+    def _parse_dates(self, unix_ts: int) -> tuple:
         """
-        Takes '2023-05-15 14:30:00' and creates the formats needed for APIs.
-        Returns: (cache_key, cg_date, unix_timestamp)
+        Takes unix timestamp integer and creates the formats needed for APIs.
+        Returns: (date_key, unix_ts_int, unix_ts_str, year)
         """
-        clean_ts = sql_timestamp.replace("T", " ").split("+")[0].split(".")[0]
+        dt = datetime.fromtimestamp(unix_ts, tz=timezone.utc)
 
-        dt = datetime.strptime(clean_ts, "%Y-%m-%d %H:%M:%S").replace(
-            tzinfo=timezone.utc
-        )
-
-        cache_key = dt.strftime("%Y-%m-%d")
-        unix_ts = int(dt.timestamp())
+        date_key = dt.strftime("%Y-%m-%d")
+        unix_ts_int = int(unix_ts)
+        unix_ts_str = str(unix_ts_int)
         year = dt.year
 
-        return cache_key, unix_ts, year
+        return date_key, unix_ts_int, unix_ts_str, year
 
-    async def get_historical_price(self, coin_id: str, sql_timestamp: str) -> float:
+    async def get_historical_price(self, coin_id: str, unix_ts: int) -> float:
         """
         The MC
         Tries Cache, then db and then DefiLlama
@@ -76,22 +73,28 @@ class HistoricalPricer:
         if coin_id in KNOWN_STABLECOINS:
             return 1.0
 
-        cache_key, unix_ts, year = self._parse_dates(sql_timestamp)
+        date_key, unix_ts_int, unix_ts_str, year = self._parse_dates(unix_ts)
 
         # Layer 1: Check Cache(0ms, 0Cost)
-        if (
-            coin_id in self.historical_cache
-            and cache_key in self.historical_cache[coin_id]
-        ):
-            val = self.historical_cache[coin_id][cache_key]
-            if val == -1.0:
-                return 0.0
-            return val
+        if coin_id in self.historical_cache:
+            # 1a. Exact Minute Match (DefiLlama Precision)
+            if unix_ts_str in self.historical_cache[coin_id]:
+                val = self.historical_cache[coin_id][unix_ts_str]
+                if val == -1.0:
+                    return 0.0
+                return val
+
+            # 1b. Daily Match (DB Backfill or Fast-Fail Negative Cache)
+            if date_key in self.historical_cache[coin_id]:
+                val = self.historical_cache[coin_id][date_key]
+                if val == -1.0:
+                    return 0.0
+                return val
 
         # Layer 1.7: The PRE-2020 Dead Zone (Random Tokens)
         if year < 2020 and coin_id not in MAJOR_COINS:
             print(f"[WARN] Skipping {coin_id} for {year} (Pre-Dex era).")
-            self._update_cache(coin_id, cache_key, -1.0)
+            self._update_cache(coin_id, date_key, -1.0)
             return 0.0
 
         # Layer 1.5: The Pre-2020 Database Lookup (Major Coins Only)
@@ -102,50 +105,54 @@ class HistoricalPricer:
                     db.supabase.table("daily_prices")
                     .select("price_usd")
                     .eq("coin_id", coin_id)
-                    .eq("date", cache_key)
+                    .eq("date", date_key)
                     .execute()
                 )
 
                 if response.data:
                     price = float(response.data[0]["price_usd"])
-                    self._update_cache(coin_id, cache_key, price)
+                    self._update_cache(coin_id, date_key, price)
                     return price
             except Exception:
                 pass
 
-            self._update_cache(coin_id, cache_key, -1.0)
+            self._update_cache(coin_id, date_key, -1.0)
             return 0.0
 
-        print(f"[PRICER] Resolving {coin_id} on {cache_key} (Exact Time: {unix_ts})")
-
         # Layer 2: The DefiLlama (Precision)
-        price = await self._fetch_defillama(coin_id, unix_ts)
+        price = await self._fetch_defillama(coin_id, unix_ts_int)
         if price > 0:
-            self._update_cache(coin_id, cache_key, price)
+            self._update_cache(coin_id, unix_ts_str, price)
             return price
 
-        # Layer 3: DefiLlama Failed - Database Fallback
-        # A daily candle is less accureate, but better thhan $0 lol
-        if coin_id in MAJOR_COINS:
-            print(f"[WARN] DefiLlama missed {coin_id}. Falling back")
-            try:
-                response = (
-                    db.supabase.table("daily_prices")
-                    .select("price_usd")
-                    .eq("coin_id", coin_id)
-                    .eq("date", cache_key)
-                    .execute()
-                )
+        return 0.0
 
-                if response.data:
-                    price = float(response.data[0]["price_usd"])
-                    self._update_cache(coin_id, cache_key, price)
-                    return price
-            except Exception:
-                pass
+    async def get_database_daily_fallback(self, coin_id: str, unix_ts: int) -> float:
+        """
+        Layer 3 fallback called by the PricerEngine if both DefiLlama and GeckoTerminal miss an asset.
+        """
+        if coin_id not in MAJOR_COINS:
+            return 0.0
 
-        print(f"[ERROR] All methods failed for {coin_id} on {cache_key}.")
-        self._update_cache(coin_id, cache_key, -1.0)
+        date_key, _, _, _ = self._parse_dates(unix_ts)
+        print(f"[WARN] DefiLlama & GT missed {coin_id}. Falling back to DB daily candle...")
+        try:
+            response = (
+                db.supabase.table("daily_prices")
+                .select("price_usd")
+                .eq("coin_id", coin_id)
+                .eq("date", date_key)
+                .execute()
+            )
+
+            if response.data:
+                price = float(response.data[0]["price_usd"])
+                self._update_cache(coin_id, date_key, price)
+                return price
+        except Exception:
+            pass
+
+        self._update_cache(coin_id, date_key, -1.0)
         return 0.0
 
     async def _fetch_defillama(self, coin_id: str, unix_ts: int) -> float:
@@ -156,13 +163,11 @@ class HistoricalPricer:
             query_id = f"ethereum:{coin_id.lower()}"
         else:
             query_id = f"coingecko:{coin_id}"
-        url = LLAMA_HISTORY_URL.format(
-            timestamp=unix_ts, prefix="coingecko", id=coin_id
-        )
+        url = LLAMA_HISTORY_URL.format(timestamp=unix_ts, query_id=query_id)
 
         async with httpx.AsyncClient() as client:
             try:
-                resp = await client.get(url)
+                resp = await client.get(url, timeout=10.0)
 
                 if resp.status_code == 200:
                     data = resp.json()
