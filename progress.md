@@ -42,23 +42,3 @@ The goal is to build a production-grade EVM portfolio indexer and PnL calculator
 * To survive live demos without 10-second loader screens, the frontend will be split:
     * **Fast Lane (0.1s):** Instantly renders the user's major assets (ETH, USDC) by querying the pre-filled local Supabase DB.
     * **Slow Lane (Background):** A backend worker slowly crunches the obscure ERC-20 tokens via the Waterfall Architecture, dynamically updating the frontend as prices resolve.
-
----
-
-## ⚠️ KNOWN BUGS & CRITICAL NEXT STEPS
-
-Before moving to the frontend, these two data-layer issues must be resolved in the new environment:
-
-### 🔴 Bug 1: The "Unique Pair" Compression Failed
-* **Symptom:** The attempt to compress API calls by extracting unique `(coin_id, timestamp)` pairs only reduced 1,000 transactions down to 966. 
-* **The Cause:** UNIX timestamps are precise to the second. If a user makes 5 transactions in one hour, they all have different exact seconds, defeating the compression. 
-* **The Fix Required:** We need to implement a "Time-Rounding" or "Block-Level" grouping strategy. If we round timestamps to the nearest 5-minute mark *before* finding unique pairs, that 1,000 will likely drop to 150.
-
-### 🔴 Bug 2: Missing ERC-20 Data for Vitalik
-* **Symptom:** The Supabase `token_transfers` table currently contains zero ERC-20 tokens for Vitalik's test address.
-* **The Cause:** The original ingestion script (fetching data from the RPC or block explorer) is likely only parsing native gas/ETH transfers and failing to decode `Transfer()` event logs for ERC-20 smart contracts.
-* **The Fix Required:** Review the data fetching script (Etherscan API or Alchemy/Infura RPC). Ensure we are specifically querying for `tokentx` (ERC-20 transfer events), not just standard normal transactions.
-
----
-
-You are fully prepped. Drop this into your new environment, and let's lock down those last two bugs so we can start rendering the PnL!
