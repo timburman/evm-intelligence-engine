@@ -21,7 +21,7 @@ class PricerEngine:
         try:
             response = (
                 db.supabase.table("token_transfers")
-                .select("id, tx_hash, token_address, amount_decimal")
+                .select("id, tx_hash, token_address, amount_decimal, direction")
                 .is_("price_at_transaction", "null")
                 .limit(1000)
                 .execute()
@@ -80,6 +80,8 @@ class PricerEngine:
                     coin_id = await token_registry.resolve_token(chain_id, token_addr)
 
                 if not coin_id:
+                    # Token failed registry validation (spam/unknown) — mark as unfetchable
+                    transfer_context.append((t, None, rounded_timestamp))
                     continue
 
                 unique_requests.add((chain_id, token_addr, coin_id, rounded_timestamp))
@@ -128,28 +130,46 @@ class PricerEngine:
                 price_map[(coin, ts)] = price
 
             # 4. Map Prices Back to Transfers
-            updates = []
+            updates_success = []
+            updates_failed = []
             for t, coin_id, ts in transfer_context:
+                if coin_id is None:
+                    # Spam token — mark as unfetchable
+                    updates_failed.append({
+                        "id": t["id"],
+                        "price_at_transaction": -1.0,
+                        "value_usd": 0.0,
+                    })
+                    continue
+
                 price = price_map.get((coin_id, ts), -1.0)
 
                 if price >= 0:
                     amount = float(t["amount_decimal"])
-                    updates.append(
+                    updates_success.append(
                         {
                             "id": t["id"],
                             "price_at_transaction": price,
                             "value_usd": round(amount * price, 2),
                         }
                     )
+                else:
+                    # All layers failed — mark as unfetchable so we don't retry forever
+                    updates_failed.append({
+                        "id": t["id"],
+                        "price_at_transaction": -1.0,
+                        "value_usd": 0.0,
+                    })
 
             # 5. Batch Update Supabase
-            if updates:
+            all_updates = updates_success + updates_failed
+            if all_updates:
                 print(
-                    f"[ENGINE] 💾 Saving {len(updates)} calculated token values to DB..."
+                    f"[ENGINE] 💾 Saving {len(updates_success)} priced + {len(updates_failed)} unfetchable to DB..."
                 )
-                for i in range(0, len(updates), 500):
+                for i in range(0, len(all_updates), 500):
                     db.supabase.table("token_transfers").upsert(
-                        updates[i : i + 500]
+                        all_updates[i : i + 500]
                     ).execute()
                 print("[ENGINE] ✅ Token transfer pricing batch complete!")
 
