@@ -1,5 +1,5 @@
 import os
-from typing import Any
+from typing import Any, Optional
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -147,6 +147,88 @@ class DatabaseClient:
             chunk = data[i : i + chunk_size]
             self.supabase.table(table).upsert(chunk).execute()
         print(f"[DB] Upserted {len(data)} rows to '{table}'")
+
+    # ---- Wallet Metadata (24h Cooldown & Incremental Sync) ----
+
+    def get_wallet_info(self, address: str) -> Optional[dict]:
+        """
+        Returns wallet record including last_fetched_at and last block numbers.
+        """
+        try:
+            resp = (
+                self.supabase.table("wallets")
+                .select("*")
+                .eq("address", address.lower())
+                .execute()
+            )
+            if resp.data:
+                return resp.data[0]
+        except Exception as e:
+            print(f"[DB] Failed to get wallet info: {e}")
+        return None
+
+    def should_refetch(self, address: str) -> bool:
+        """
+        Returns True if the wallet has never been fetched or was fetched >24h ago.
+        """
+        from datetime import datetime, timezone, timedelta
+
+        wallet = self.get_wallet_info(address.lower())
+        if not wallet:
+            return True
+
+        last_fetched = wallet.get("last_fetched_at")
+        if not last_fetched:
+            return True
+
+        try:
+            # Parse ISO timestamp from Supabase
+            clean_ts = str(last_fetched).replace("T", " ").split("+")[0].split(".")[0]
+            dt = datetime.strptime(clean_ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - dt) > timedelta(hours=24)
+        except Exception:
+            return True
+
+    def get_last_blocks(self, address: str) -> dict:
+        """
+        Returns the last fetched block numbers per category.
+        """
+        wallet = self.get_wallet_info(address.lower())
+        if not wallet:
+            return {"normal": 0, "internal": 0, "erc20": 0}
+
+        return {
+            "normal": wallet.get("last_block_normal") or 0,
+            "internal": wallet.get("last_block_internal") or 0,
+            "erc20": wallet.get("last_block_erc20") or 0,
+        }
+
+    def update_wallet_fetch_metadata(self, address: str, blocks: dict):
+        """
+        Updates the wallet's last_fetched_at timestamp and block numbers after a successful sync.
+        """
+        from datetime import datetime, timezone
+
+        try:
+            update_data = {
+                "address": address.lower(),
+                "last_fetched_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+            # Only update block numbers that are greater than 0 (i.e., new data was found)
+            if blocks.get("normal", 0) > 0:
+                update_data["last_block_normal"] = blocks["normal"]
+            if blocks.get("internal", 0) > 0:
+                update_data["last_block_internal"] = blocks["internal"]
+            if blocks.get("erc20", 0) > 0:
+                update_data["last_block_erc20"] = blocks["erc20"]
+
+            self.supabase.table("wallets").upsert(
+                update_data, on_conflict="address"
+            ).execute()
+            print(f"[DB] Wallet metadata updated for {address[:8]}...")
+        except Exception as e:
+            print(f"[DB] Failed to update wallet metadata: {e}")
 
 
 db = DatabaseClient()
