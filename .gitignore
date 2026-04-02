@@ -1,2 +1,15 @@
+# Environment
 *.env
-venv
+venv/
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+
+# Data caches (regenerated at runtime)
+data/prices/historical_cache.json
+data/prices/price_cache.json
+data/prices/missing_tokens.json
+data/prices/coin_list.json
+data/raw_txs/
