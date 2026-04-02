@@ -56,7 +56,7 @@ async def fetch_all_txs(address: str, chain_id: str = "1") -> dict:
         if new_internal:
             cache["internal"].extend(new_internal)
             cache["metadata"]["last_blocks"]["internal"] = last_block_i
-            cache["internal"].extend(new_internal)
+            delta["internal"].extend(new_internal)
 
         # Sync ERC20 Transactions
         last_erc20 = cache["metadata"]["last_blocks"]["erc20"]
