@@ -19,6 +19,10 @@ KNOWN_STABLECOINS = {
     "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",  # USDC
     "0xdac17f958d2ee523a2206206994597c13d831ec7",  # USDT
     "0x6b175474e89094c44da98b954eedeac495271d0f",  # DAI
+    "0x853d955acef822db058eb8505911ed77f175b99e",  # FRAX
+    # Polygon USDC
+    "0x2791bca1f2de4661ed88a30c99a7a9449aa84174",  # USDC.e on Polygon
+    "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",  # USDC native on Polygon
 }
 
 MAJOR_COINS = {"ethereum", "polygon-ecosystem-token", "binancecoin"}
@@ -125,6 +129,8 @@ class HistoricalPricer:
             self._update_cache(coin_id, unix_ts_str, price)
             return price
 
+        # Cache the miss so we don't re-query this exact timestamp
+        self._update_cache(coin_id, unix_ts_str, -1.0)
         return 0.0
 
     async def get_database_daily_fallback(self, coin_id: str, unix_ts: int) -> float:
